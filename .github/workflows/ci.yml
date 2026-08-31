@@ -1,0 +1,76 @@
+name: StreamForge CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Check formatting
+        shell: bash
+        run: test -z "$(gofmt -l .)"
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
+        with:
+          version: v1.64.8
+
+      - name: Unit tests with race detector
+        run: go test -race ./... -count=1
+
+      - name: Build
+        run: go build -trimpath ./cmd/streamforge
+
+      - name: Test dependency adapters with Testcontainers
+        env:
+          STREAMFORGE_INTEGRATION: '1'
+        run: go test ./tests/integration -count=1 -v
+
+      - name: Compose smoke test
+        run: |
+          docker compose up --build -d
+          trap 'docker compose down -v' EXIT
+          for attempt in {1..60}; do
+            if curl --fail --silent http://localhost:8080/health | jq -e '.status == "ok"' >/dev/null; then
+              break
+            fi
+            if [ "$attempt" = 60 ]; then
+              docker compose ps
+              docker compose logs api kafka-init
+              exit 1
+            fi
+            sleep 2
+          done
+          bash scripts/smoke.sh
+
+      - name: Upload Compose logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: streamforge-compose-logs
+          path: |
+            /tmp/streamforge-compose-logs
+            .
+          if-no-files-found: ignore
