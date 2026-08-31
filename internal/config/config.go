@@ -86,13 +86,16 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 
-	for key, value := range map[string]string{
-		"POSTGRES_URL":   cfg.PostgresURL,
-		"KAFKA_BROKERS":  strings.Join(cfg.KafkaBrokers, ","),
-		"CLICKHOUSE_URL": cfg.ClickHouseURL,
+	for _, required := range []struct {
+		key   string
+		value string
+	}{
+		{key: "POSTGRES_URL", value: cfg.PostgresURL},
+		{key: "KAFKA_BROKERS", value: strings.Join(cfg.KafkaBrokers, ",")},
+		{key: "CLICKHOUSE_URL", value: cfg.ClickHouseURL},
 	} {
-		if strings.TrimSpace(value) == "" {
-			return Config{}, fmt.Errorf("%s is required", key)
+		if strings.TrimSpace(required.value) == "" {
+			return Config{}, fmt.Errorf("%s is required", required.key)
 		}
 	}
 	if cfg.QueueCapacity < cfg.WorkerCount {
