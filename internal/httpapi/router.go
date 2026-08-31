@@ -12,6 +12,7 @@ import (
 	"github.com/denfry/streamforge-go/internal/campaigns"
 	"github.com/denfry/streamforge-go/internal/domain"
 	"github.com/denfry/streamforge-go/internal/events"
+	"github.com/denfry/streamforge-go/internal/observability"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -24,14 +25,21 @@ type CampaignService interface {
 type EventProducer interface {
 	Publish(context.Context, domain.Event) error
 }
+type HealthChecker interface {
+	Check(context.Context) map[string]string
+}
 
 type Dependencies struct {
-	Campaigns      CampaignService
-	Producer       EventProducer
-	Stats          analytics.Store
-	BodyLimit      int64
-	PublishTimeout time.Duration
-	StatsMaxRange  time.Duration
+	Campaigns         CampaignService
+	Producer          EventProducer
+	Stats             analytics.Store
+	Health            HealthChecker
+	Metrics           *observability.Metrics
+	BodyLimit         int64
+	PublishTimeout    time.Duration
+	StatsMaxRange     time.Duration
+	RateLimitRequests int
+	RateLimitWindow   time.Duration
 }
 
 func NewRouter(deps Dependencies) http.Handler {
@@ -44,11 +52,25 @@ func NewRouter(deps Dependencies) http.Handler {
 
 	r := chi.NewRouter()
 	r.Use(requestID)
+	if deps.Metrics != nil {
+		r.Use(deps.Metrics.HTTPMiddleware)
+	}
 	r.Post("/v1/campaigns", deps.createCampaign)
 	r.Get("/v1/campaigns/{id}", deps.getCampaign)
-	r.Post("/v1/events/impression", deps.publishEvent(domain.EventTypeImpression))
-	r.Post("/v1/events/click", deps.publishEvent(domain.EventTypeClick))
 	r.Get("/v1/stats/campaign/{id}", deps.getCampaignStats)
+
+	eventRoutes := chi.NewRouter()
+	if deps.RateLimitRequests > 0 {
+		eventRoutes.Use(NewRateLimiter(deps.RateLimitRequests, deps.RateLimitWindow))
+	}
+	eventRoutes.Post("/impression", deps.publishEvent(domain.EventTypeImpression))
+	eventRoutes.Post("/click", deps.publishEvent(domain.EventTypeClick))
+	r.Mount("/v1/events", eventRoutes)
+
+	r.Get("/health", deps.health)
+	if deps.Metrics != nil {
+		r.Handle("/metrics", deps.Metrics.Handler())
+	}
 	return r
 }
 
@@ -108,6 +130,22 @@ func (d Dependencies) publishEvent(expected domain.EventType) http.HandlerFunc {
 	}
 }
 
+func (d Dependencies) health(w http.ResponseWriter, r *http.Request) {
+	components := map[string]string{"api": "ok"}
+	if d.Health != nil {
+		for component, status := range d.Health.Check(r.Context()) {
+			components[component] = status
+		}
+	}
+	status := http.StatusOK
+	for _, componentStatus := range components {
+		if componentStatus != "ok" {
+			status = http.StatusServiceUnavailable
+			break
+		}
+	}
+	writeJSON(w, status, map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[status == http.StatusOK], "components": components})
+}
 func (d Dependencies) getCampaignStats(w http.ResponseWriter, r *http.Request) {
 	if d.Stats == nil {
 		writeError(w, http.StatusServiceUnavailable, "analytics_unavailable", "analytics is unavailable")
