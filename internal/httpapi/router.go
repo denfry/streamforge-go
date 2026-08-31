@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/denfry/streamforge-go/internal/analytics"
 	"github.com/denfry/streamforge-go/internal/campaigns"
 	"github.com/denfry/streamforge-go/internal/domain"
 	"github.com/denfry/streamforge-go/internal/events"
@@ -27,8 +28,10 @@ type EventProducer interface {
 type Dependencies struct {
 	Campaigns      CampaignService
 	Producer       EventProducer
+	Stats          analytics.Store
 	BodyLimit      int64
 	PublishTimeout time.Duration
+	StatsMaxRange  time.Duration
 }
 
 func NewRouter(deps Dependencies) http.Handler {
@@ -45,6 +48,7 @@ func NewRouter(deps Dependencies) http.Handler {
 	r.Get("/v1/campaigns/{id}", deps.getCampaign)
 	r.Post("/v1/events/impression", deps.publishEvent(domain.EventTypeImpression))
 	r.Post("/v1/events/click", deps.publishEvent(domain.EventTypeClick))
+	r.Get("/v1/stats/campaign/{id}", deps.getCampaignStats)
 	return r
 }
 
@@ -102,6 +106,58 @@ func (d Dependencies) publishEvent(expected domain.EventType) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"event_id": event.EventID.String(), "status": "accepted"})
 	}
+}
+
+func (d Dependencies) getCampaignStats(w http.ResponseWriter, r *http.Request) {
+	if d.Stats == nil {
+		writeError(w, http.StatusServiceUnavailable, "analytics_unavailable", "analytics is unavailable")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_campaign_id", "campaign id must be a UUID")
+		return
+	}
+	from, to, err := parseStatsRange(r, d.StatsMaxRange)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_stats_range", err.Error())
+		return
+	}
+	stats, err := d.Stats.CampaignStats(r.Context(), id, from, to)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "stats_unavailable", "statistics could not be loaded")
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func parseStatsRange(r *http.Request, maxRange time.Duration) (time.Time, time.Time, error) {
+	if maxRange <= 0 {
+		maxRange = 31 * 24 * time.Hour
+	}
+	fromValue, toValue := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	now := time.Now().UTC()
+	if fromValue == "" && toValue == "" {
+		return now.Add(-24 * time.Hour), now, nil
+	}
+	if fromValue == "" || toValue == "" {
+		return time.Time{}, time.Time{}, errors.New("from and to must be provided together")
+	}
+	from, err := time.Parse(time.RFC3339, fromValue)
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.New("from must be RFC3339")
+	}
+	to, err := time.Parse(time.RFC3339, toValue)
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.New("to must be RFC3339")
+	}
+	if !to.After(from) {
+		return time.Time{}, time.Time{}, errors.New("to must be after from")
+	}
+	if to.Sub(from) > maxRange {
+		return time.Time{}, time.Time{}, errors.New("requested range is too large")
+	}
+	return from.UTC(), to.UTC(), nil
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, target any) error {
