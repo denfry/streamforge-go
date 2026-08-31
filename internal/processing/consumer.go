@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"time"
-
 	"github.com/denfry/streamforge-go/internal/analytics"
 	"github.com/denfry/streamforge-go/internal/domain"
+	"github.com/denfry/streamforge-go/internal/observability"
+	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
+	"io"
+	"time"
 )
 
 type MessageReader interface {
@@ -22,11 +23,17 @@ type MessageReader interface {
 type DeadLetterPublisher interface {
 	Publish(context.Context, domain.Event, kafka.Message, domain.FailureMetadata) error
 }
+type Counter interface {
+	IncrementEvent(context.Context, uuid.UUID, domain.EventType, time.Duration) error
+}
 
 type ConsumerDependencies struct {
 	Reader         MessageReader
 	Analytics      analytics.Store
 	DLQ            DeadLetterPublisher
+	Counter        Counter
+	CounterTTL     time.Duration
+	Metrics        *observability.Metrics
 	WorkerCount    int
 	QueueCapacity  int
 	Retry          RetryPolicy
@@ -38,6 +45,9 @@ type Consumer struct {
 	reader         MessageReader
 	analytics      analytics.Store
 	dlq            DeadLetterPublisher
+	counter        Counter
+	counterTTL     time.Duration
+	metrics        *observability.Metrics
 	workerCount    int
 	queueCapacity  int
 	retry          RetryPolicy
@@ -59,10 +69,16 @@ func NewConsumer(deps ConsumerDependencies) *Consumer {
 	if deps.DLQTimeout <= 0 {
 		deps.DLQTimeout = 2 * time.Second
 	}
+	if deps.CounterTTL <= 0 {
+		deps.CounterTTL = 5 * time.Minute
+	}
 	return &Consumer{
 		reader:         deps.Reader,
 		analytics:      deps.Analytics,
 		dlq:            deps.DLQ,
+		counter:        deps.Counter,
+		counterTTL:     deps.CounterTTL,
+		metrics:        deps.Metrics,
 		workerCount:    deps.WorkerCount,
 		queueCapacity:  deps.QueueCapacity,
 		retry:          deps.Retry,
@@ -90,6 +106,9 @@ func (c *Consumer) Run(ctx context.Context) error {
 	var firstErr error
 	for result := range pool.Results() {
 		if result.Err != nil {
+			if c.metrics != nil {
+				c.metrics.RecordProcessing("failed")
+			}
 			if firstErr == nil {
 				firstErr = result.Err
 			}
@@ -128,6 +147,9 @@ func (c *Consumer) fetch(ctx context.Context, pool *Pool) error {
 		if err := pool.Submit(ctx, job); err != nil {
 			return err
 		}
+		if c.metrics != nil {
+			c.metrics.SetQueueDepth(pool.Depth())
+		}
 	}
 }
 
@@ -140,9 +162,18 @@ func (c *Consumer) handle(ctx context.Context, job Job) error {
 	attempt := 0
 	attempts, err := c.retry.Run(processCtx, func(operationCtx context.Context) error {
 		attempt++
+		if attempt > 1 && c.metrics != nil {
+			c.metrics.RecordRetry()
+		}
 		return c.analytics.InsertEvent(operationCtx, job.Event, time.Now().UTC(), attempt)
 	})
 	if err == nil {
+		if c.counter != nil {
+			_ = c.counter.IncrementEvent(ctx, job.Event.CampaignID, job.Event.Type, c.counterTTL)
+		}
+		if c.metrics != nil {
+			c.metrics.RecordProcessing("success")
+		}
 		return nil
 	}
 	return c.publishDLQ(job, attempts, err)
@@ -163,6 +194,10 @@ func (c *Consumer) publishDLQ(job Job, attempts int, processingErr error) error 
 	}
 	if err := c.dlq.Publish(ctx, job.Event, job.Message, failure); err != nil {
 		return fmt.Errorf("publish dead-letter event: %w", err)
+	}
+	if c.metrics != nil {
+		c.metrics.RecordDLQ()
+		c.metrics.RecordProcessing("dlq")
 	}
 	return nil
 }

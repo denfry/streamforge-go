@@ -100,3 +100,7 @@ func (p *Pool) Results() <-chan Result {
 func (p *Pool) CloseInput() {
 	p.close.Do(func() { close(p.jobs) })
 }
+
+func (p *Pool) Depth() int {
+	return len(p.jobs)
+}

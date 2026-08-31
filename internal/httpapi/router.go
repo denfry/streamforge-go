@@ -120,11 +120,25 @@ func (d Dependencies) publishEvent(expected domain.EventType) http.HandlerFunc {
 			writeServiceError(w, err)
 			return
 		}
+		if userStore, ok := d.Campaigns.(interface {
+			EnsureUser(context.Context, string) error
+		}); ok {
+			if err := userStore.EnsureUser(r.Context(), event.UserID); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "user_store_unavailable", "event could not be accepted")
+				return
+			}
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), d.PublishTimeout)
 		defer cancel()
 		if err := d.Producer.Publish(ctx, event); err != nil {
+			if d.Metrics != nil {
+				d.Metrics.RecordPublish("failed")
+			}
 			writeError(w, http.StatusServiceUnavailable, "event_publish_failed", "event could not be accepted")
 			return
+		}
+		if d.Metrics != nil {
+			d.Metrics.RecordPublish("success")
 		}
 		writeJSON(w, http.StatusAccepted, map[string]string{"event_id": event.EventID.String(), "status": "accepted"})
 	}
