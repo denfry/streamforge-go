@@ -34,7 +34,7 @@ The service is intentionally a single-node local stack. It does not implement ad
 
 ## Quick Start
 
-Requirements: Docker Desktop with Linux containers, Docker Compose v2, and `curl`/`jq` for the smoke script.
+Requirements: Docker Desktop with Linux containers, Docker Compose v2, `curl`, and Python 3.11+ for the smoke script.
 
 ```bash
 docker compose up --build
@@ -127,7 +127,7 @@ go test ./internal/processing -bench BenchmarkPoolSubmit -benchmem -count=1
 Observed run: Windows `amd64`, AMD Ryzen 5 5600G with Radeon Graphics, Go `1.26.4`:
 
 ```text
-BenchmarkPoolSubmit-12    1795594    699.2 ns/op    0 B/op    0 allocs/op
+BenchmarkPoolSubmit-12    1826887    792.0 ns/op    0 B/op    0 allocs/op
 ```
 
 This measures the local bounded pool submission path with a no-op handler. It is not a production throughput claim and is not a substitute for traffic-shaped load testing.

@@ -64,12 +64,25 @@ func TestDependencyAdaptersEndToEnd(t *testing.T) {
 	}
 
 	clickhouseContainer := startContainer(t, ctx, testcontainers.ContainerRequest{
-		Image:        "clickhouse/clickhouse-server:24.8-alpine",
-		ExposedPorts: []string{"9000/tcp"},
-		WaitingFor:   wait.ForListeningPort(nat.Port("9000/tcp")),
+		Image: "clickhouse/clickhouse-server:24.8-alpine",
+		Env: map[string]string{
+			"CLICKHOUSE_USER":                      "app",
+			"CLICKHOUSE_PASSWORD":                  "app",
+			"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1",
+		},
+		Files: []testcontainers.ContainerFile{{
+			HostFilePath:      filepath.Join(root, "deploy", "clickhouse", "listen.xml"),
+			ContainerFilePath: "/etc/clickhouse-server/config.d/listen.xml",
+			FileMode:          0o644,
+		}},
+		ExposedPorts: []string{"8123/tcp", "9000/tcp"},
+		WaitingFor:   wait.ForHTTP("/ping").WithPort(nat.Port("8123/tcp")).WithStartupTimeout(2 * time.Minute),
 	})
 	clickhouseHost := containerEndpoint(t, ctx, clickhouseContainer, "9000/tcp")
-	clickConn, err := clickhousedriver.Open(&clickhousedriver.Options{Addr: []string{clickhouseHost}})
+	clickConn, err := clickhousedriver.Open(&clickhousedriver.Options{
+		Addr: []string{clickhouseHost},
+		Auth: clickhousedriver.Auth{Username: "app", Password: "app"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

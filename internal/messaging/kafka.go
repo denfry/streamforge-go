@@ -18,11 +18,10 @@ type Writer interface {
 
 type Producer struct {
 	writer Writer
-	topic  string
 }
 
-func NewProducer(writer Writer, topic string) *Producer {
-	return &Producer{writer: writer, topic: topic}
+func NewProducer(writer Writer) *Producer {
+	return &Producer{writer: writer}
 }
 
 func NewWriter(brokers []string, topic string) *kafka.Writer {
@@ -44,7 +43,6 @@ func (p *Producer) Publish(ctx context.Context, event domain.Event) error {
 		return fmt.Errorf("encode event: %w", err)
 	}
 	return p.writer.WriteMessages(ctx, kafka.Message{
-		Topic: p.topic,
 		Key:   []byte(event.EventID.String()),
 		Value: payload,
 		Time:  time.Now().UTC(),
@@ -57,11 +55,10 @@ func (p *Producer) Close() error {
 
 type DLQPublisher struct {
 	writer Writer
-	topic  string
 }
 
-func NewDLQPublisher(writer Writer, topic string) *DLQPublisher {
-	return &DLQPublisher{writer: writer, topic: topic}
+func NewDLQPublisher(writer Writer) *DLQPublisher {
+	return &DLQPublisher{writer: writer}
 }
 
 func (p *DLQPublisher) Publish(ctx context.Context, event domain.Event, source kafka.Message, failure domain.FailureMetadata) error {
@@ -70,7 +67,6 @@ func (p *DLQPublisher) Publish(ctx context.Context, event domain.Event, source k
 		return fmt.Errorf("encode dead-letter event: %w", err)
 	}
 	return p.writer.WriteMessages(ctx, kafka.Message{
-		Topic: p.topic,
 		Key:   []byte(event.EventID.String()),
 		Value: payload,
 		Headers: []kafka.Header{

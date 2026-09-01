@@ -28,32 +28,34 @@ type Counter interface {
 }
 
 type ConsumerDependencies struct {
-	Reader         MessageReader
-	Analytics      analytics.Store
-	DLQ            DeadLetterPublisher
-	Counter        Counter
-	CounterTTL     time.Duration
-	Metrics        *observability.Metrics
-	WorkerCount    int
-	QueueCapacity  int
-	Retry          RetryPolicy
-	ProcessTimeout time.Duration
-	DLQTimeout     time.Duration
+	Reader          MessageReader
+	Analytics       analytics.Store
+	DLQ             DeadLetterPublisher
+	Counter         Counter
+	CounterTTL      time.Duration
+	Metrics         *observability.Metrics
+	WorkerCount     int
+	QueueCapacity   int
+	Retry           RetryPolicy
+	ProcessTimeout  time.Duration
+	DLQTimeout      time.Duration
+	ShutdownTimeout time.Duration
 }
 
 type Consumer struct {
-	reader         MessageReader
-	analytics      analytics.Store
-	dlq            DeadLetterPublisher
-	counter        Counter
-	counterTTL     time.Duration
-	metrics        *observability.Metrics
-	workerCount    int
-	queueCapacity  int
-	retry          RetryPolicy
-	processTimeout time.Duration
-	dlqTimeout     time.Duration
-	coordinator    *OffsetCoordinator
+	reader          MessageReader
+	analytics       analytics.Store
+	dlq             DeadLetterPublisher
+	counter         Counter
+	counterTTL      time.Duration
+	metrics         *observability.Metrics
+	workerCount     int
+	queueCapacity   int
+	retry           RetryPolicy
+	processTimeout  time.Duration
+	dlqTimeout      time.Duration
+	shutdownTimeout time.Duration
+	coordinator     *OffsetCoordinator
 }
 
 func NewConsumer(deps ConsumerDependencies) *Consumer {
@@ -66,25 +68,23 @@ func NewConsumer(deps ConsumerDependencies) *Consumer {
 	if deps.ProcessTimeout <= 0 {
 		deps.ProcessTimeout = 5 * time.Second
 	}
-	if deps.DLQTimeout <= 0 {
-		deps.DLQTimeout = 2 * time.Second
-	}
-	if deps.CounterTTL <= 0 {
-		deps.CounterTTL = 5 * time.Minute
+	if deps.ShutdownTimeout <= 0 {
+		deps.ShutdownTimeout = 10 * time.Second
 	}
 	return &Consumer{
-		reader:         deps.Reader,
-		analytics:      deps.Analytics,
-		dlq:            deps.DLQ,
-		counter:        deps.Counter,
-		counterTTL:     deps.CounterTTL,
-		metrics:        deps.Metrics,
-		workerCount:    deps.WorkerCount,
-		queueCapacity:  deps.QueueCapacity,
-		retry:          deps.Retry,
-		processTimeout: deps.ProcessTimeout,
-		dlqTimeout:     deps.DLQTimeout,
-		coordinator:    NewOffsetCoordinator(),
+		reader:          deps.Reader,
+		analytics:       deps.Analytics,
+		dlq:             deps.DLQ,
+		counter:         deps.Counter,
+		counterTTL:      deps.CounterTTL,
+		metrics:         deps.Metrics,
+		workerCount:     deps.WorkerCount,
+		queueCapacity:   deps.QueueCapacity,
+		retry:           deps.Retry,
+		processTimeout:  deps.ProcessTimeout,
+		dlqTimeout:      deps.DLQTimeout,
+		shutdownTimeout: deps.ShutdownTimeout,
+		coordinator:     NewOffsetCoordinator(),
 	}
 }
 
@@ -92,14 +92,33 @@ func (c *Consumer) Run(ctx context.Context) error {
 	if c.reader == nil || c.analytics == nil {
 		return errors.New("consumer requires reader and analytics store")
 	}
-	poolCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	poolCtx, cancelPool := context.WithCancel(context.Background())
+	defer cancelPool()
+	fetchCtx, cancelFetch := context.WithCancel(ctx)
+	defer cancelFetch()
 	pool := NewPool(c.workerCount, c.queueCapacity, c.handle)
-	go pool.Run(poolCtx)
+	poolDone := make(chan struct{})
+	go func() {
+		pool.Run(poolCtx)
+		close(poolDone)
+	}()
+	go func() {
+		select {
+		case <-ctx.Done():
+			timer := time.NewTimer(c.shutdownTimeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancelPool()
+			case <-poolDone:
+			}
+		case <-poolDone:
+		}
+	}()
 
 	fetchErrors := make(chan error, 1)
 	go func() {
-		fetchErrors <- c.fetch(poolCtx, pool)
+		fetchErrors <- c.fetch(fetchCtx, pool)
 		pool.CloseInput()
 	}()
 
@@ -117,13 +136,16 @@ func (c *Consumer) Run(ctx context.Context) error {
 		if offset, ok := c.coordinator.Complete(result.Job.Message.Partition, result.Job.Message.Offset); ok {
 			commit := result.Job.Message
 			commit.Offset = offset
-			if err := c.reader.CommitMessages(ctx, commit); err != nil && firstErr == nil {
+			if err := c.reader.CommitMessages(poolCtx, commit); err != nil && firstErr == nil {
 				firstErr = fmt.Errorf("commit Kafka offset: %w", err)
 			}
 		}
 	}
 	if err := <-fetchErrors; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) && firstErr == nil {
 		firstErr = err
+	}
+	if err := poolCtx.Err(); err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("consumer drain: %w", err)
 	}
 	return firstErr
 }

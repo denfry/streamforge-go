@@ -77,10 +77,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	campaignService := campaigns.NewService(postgres.NewStore(pool), cache, cfg.CampaignCacheTTL)
 	writer := messaging.NewWriter(cfg.KafkaBrokers, cfg.KafkaTopic)
 	defer writer.Close()
-	producer := messaging.NewProducer(writer, cfg.KafkaTopic)
+	producer := messaging.NewProducer(writer)
 	dlqWriter := messaging.NewWriter(cfg.KafkaBrokers, cfg.KafkaDLQTopic)
 	defer dlqWriter.Close()
-	dlq := messaging.NewDLQPublisher(dlqWriter, cfg.KafkaDLQTopic)
+	dlq := messaging.NewDLQPublisher(dlqWriter)
 	reader := kafka.NewReader(kafka.ReaderConfig{
 		Brokers:       cfg.KafkaBrokers,
 		GroupID:       cfg.KafkaGroupID,
@@ -109,17 +109,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	})
 	server := &http.Server{Addr: cfg.HTTPAddr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
 	consumer := processing.NewConsumer(processing.ConsumerDependencies{
-		Reader:         reader,
-		Analytics:      analyticsStore,
-		DLQ:            dlq,
-		Counter:        cache,
-		CounterTTL:     cfg.CampaignCacheTTL,
-		Metrics:        metrics,
-		WorkerCount:    cfg.WorkerCount,
-		QueueCapacity:  cfg.QueueCapacity,
-		Retry:          processing.RetryPolicy{MaxAttempts: cfg.RetryMaxAttempts, BaseDelay: cfg.RetryBaseDelay, Classify: func(error) bool { return true }},
-		ProcessTimeout: cfg.ProcessTimeout,
-		DLQTimeout:     cfg.PublishTimeout,
+		Reader:          reader,
+		Analytics:       analyticsStore,
+		DLQ:             dlq,
+		Counter:         cache,
+		CounterTTL:      cfg.CampaignCacheTTL,
+		Metrics:         metrics,
+		WorkerCount:     cfg.WorkerCount,
+		QueueCapacity:   cfg.QueueCapacity,
+		Retry:           processing.RetryPolicy{MaxAttempts: cfg.RetryMaxAttempts, BaseDelay: cfg.RetryBaseDelay, Classify: func(error) bool { return true }},
+		ProcessTimeout:  cfg.ProcessTimeout,
+		DLQTimeout:      cfg.PublishTimeout,
+		ShutdownTimeout: cfg.ShutdownTimeout,
 	})
 
 	serverErrors := make(chan error, 1)

@@ -63,6 +63,96 @@ func TestConsumerPublishesDLQAfterFinalRetry(t *testing.T) {
 		t.Fatalf("attempts=%d, want 2", dlq.messages[0].Attempts)
 	}
 }
+func TestConsumerDrainsInFlightMessageAfterShutdown(t *testing.T) {
+	reader := &shutdownReader{message: eventMessage(12)}
+	analyticsStore := &shutdownAnalytics{
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		processed: make(chan struct{}),
+	}
+	consumer := NewConsumer(ConsumerDependencies{
+		Reader:          reader,
+		Analytics:       analyticsStore,
+		DLQ:             &fakeDLQ{},
+		WorkerCount:     1,
+		QueueCapacity:   1,
+		Retry:           RetryPolicy{MaxAttempts: 1},
+		ProcessTimeout:  time.Second,
+		DLQTimeout:      time.Second,
+		ShutdownTimeout: time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runResult := make(chan error, 1)
+	go func() { runResult <- consumer.Run(ctx) }()
+
+	<-analyticsStore.started
+	cancel()
+	close(analyticsStore.release)
+
+	select {
+	case err := <-runResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("consumer did not drain before shutdown deadline")
+	}
+	select {
+	case <-analyticsStore.processed:
+	default:
+		t.Fatal("in-flight event was canceled instead of drained")
+	}
+	if len(reader.commits) != 1 || reader.commits[0].Offset != 12 {
+		t.Fatalf("commits=%+v, want offset 12", reader.commits)
+	}
+}
+
+type shutdownReader struct {
+	message kafka.Message
+	sent    bool
+	commits []kafka.Message
+}
+
+func (r *shutdownReader) FetchMessage(ctx context.Context) (kafka.Message, error) {
+	if !r.sent {
+		r.sent = true
+		return r.message, nil
+	}
+	<-ctx.Done()
+	return kafka.Message{}, ctx.Err()
+}
+
+func (r *shutdownReader) CommitMessages(_ context.Context, messages ...kafka.Message) error {
+	r.commits = append(r.commits, messages...)
+	return nil
+}
+
+func (r *shutdownReader) Close() error { return nil }
+
+type shutdownAnalytics struct {
+	started   chan struct{}
+	release   chan struct{}
+	processed chan struct{}
+}
+
+func (a *shutdownAnalytics) CampaignStats(context.Context, uuid.UUID, time.Time, time.Time) (domain.CampaignStats, error) {
+	return domain.CampaignStats{}, nil
+}
+
+func (a *shutdownAnalytics) Ping(context.Context) error { return nil }
+
+func (a *shutdownAnalytics) Close() error { return nil }
+
+func (a *shutdownAnalytics) InsertEvent(ctx context.Context, _ domain.Event, _ time.Time, _ int) error {
+	close(a.started)
+	<-a.release
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	close(a.processed)
+	return nil
+}
 
 func eventMessage(offset int64) kafka.Message {
 	event := domain.Event{EventID: uuid.New(), Type: domain.EventTypeImpression, CampaignID: uuid.New(), UserID: "user-1", OccurredAt: time.Now().UTC()}

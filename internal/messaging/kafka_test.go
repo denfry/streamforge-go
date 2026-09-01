@@ -13,7 +13,7 @@ import (
 
 func TestProducerPublishesVersionedEventEnvelope(t *testing.T) {
 	writer := &fakeWriter{}
-	producer := NewProducer(writer, "streamforge.events")
+	producer := NewProducer(writer)
 	event := domain.Event{EventID: uuid.New(), Type: domain.EventTypeClick, CampaignID: uuid.New(), UserID: "user-1"}
 
 	if err := producer.Publish(context.Background(), event); err != nil {
@@ -29,14 +29,14 @@ func TestProducerPublishesVersionedEventEnvelope(t *testing.T) {
 	if envelope.SchemaVersion != 1 || envelope.Event.EventID != event.EventID {
 		t.Fatalf("unexpected envelope: %+v", envelope)
 	}
-	if string(writer.messages[0].Key) != event.EventID.String() || writer.messages[0].Topic != "streamforge.events" {
+	if string(writer.messages[0].Key) != event.EventID.String() || writer.messages[0].Topic != "" {
 		t.Fatalf("unexpected message routing: %+v", writer.messages[0])
 	}
 }
 
 func TestProducerPropagatesWriterFailure(t *testing.T) {
 	wantErr := errors.New("broker unavailable")
-	producer := NewProducer(&fakeWriter{err: wantErr}, "streamforge.events")
+	producer := NewProducer(&fakeWriter{err: wantErr})
 	if err := producer.Publish(context.Background(), domain.Event{EventID: uuid.New()}); !errors.Is(err, wantErr) {
 		t.Fatalf("error=%v, want %v", err, wantErr)
 	}

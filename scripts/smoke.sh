@@ -6,7 +6,7 @@ campaign_json="$(curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
   -d '{"name":"Smoke campaign","daily_budget":100,"currency":"USD"}' \
   "${base_url}/v1/campaigns")"
-campaign_id="$(jq -er '.id' <<<"${campaign_json}")"
+campaign_id="$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"${campaign_json}")"
 
 curl --fail --silent --show-error \
   -H 'Content-Type: application/json' \
@@ -20,9 +20,10 @@ curl --fail --silent --show-error \
 
 for _ in {1..40}; do
   stats="$(curl --fail --silent --show-error "${base_url}/v1/stats/campaign/${campaign_id}")"
-  if jq -e '.impressions == 1 and .clicks == 1' <<<"${stats}" >/dev/null; then
-    jq -e '.status == "ok"' <<<"$(curl --fail --silent --show-error "${base_url}/health")" >/dev/null
-    jq -e 'length > 0' <<<"$(curl --fail --silent --show-error "${base_url}/metrics")" >/dev/null
+  if python -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d["impressions"] == 1 and d["clicks"] == 1 else 1)' <<<"${stats}"; then
+    python -c 'import json,sys; raise SystemExit(0 if json.load(sys.stdin)["status"] == "ok" else 1)' <<<"$(curl --fail --silent --show-error "${base_url}/health")"
+    metrics="$(curl --fail --silent --show-error "${base_url}/metrics")"
+    test -n "${metrics}"
     printf '%s\n' "${stats}"
     exit 0
   fi
